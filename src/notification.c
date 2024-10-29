@@ -1,3 +1,5 @@
+// Notification.c 
+
 #include <gtk/gtk.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +11,8 @@
 #include "battery_monitor.h"
 #include "process_monitor.h"
 #include "log_message.h"
+#include <glob.h>
+#include <sys/stat.h>
 
 #define CSS_STYLE "\
     * { \
@@ -21,21 +25,59 @@
     } \
 "
 
-// Function to get the battery level
-int get_battery_level() {
-    const char *battery_paths[] = {
-        "/sys/class/power_supply/BAT0/capacity",
-        "/sys/class/power_supply/BAT1/capacity"
-    };
-    FILE *file;
-    int battery_level = -1;
+extern int battery_saving_mode_active;
 
-    for (int i = 0; i < sizeof(battery_paths) / sizeof(battery_paths[0]); i++) {
-        file = fopen(battery_paths[i], "r");
-        if (file != NULL) {
-            break;
+typedef enum {
+    INIT_SYSTEMD,
+    INIT_SYSVINIT,
+    INIT_OPENRC,
+    INIT_UNKNOWN
+} init_system_t;
+
+init_system_t detect_init_system() {
+    struct stat sb;
+
+    if (stat("/run/systemd/system", &sb) == 0) {
+        return INIT_SYSTEMD;
+    } else if (stat("/sbin/init", &sb) == 0) {
+        // Additional checks can be added here
+        return INIT_SYSVINIT;
+    } else if (stat("/run/openrc", &sb) == 0) {
+        return INIT_OPENRC;
+    }
+
+    return INIT_UNKNOWN;
+}
+
+// Function to find the battery path dynamically
+char *get_battery_device_path(const char *file_name) {
+    glob_t glob_result;
+    char pattern[PATH_MAX];
+
+    snprintf(pattern, sizeof(pattern), "/sys/class/power_supply/BAT*/%s", file_name);
+
+    if (glob(pattern, 0, NULL, &glob_result) == 0) {
+        if (glob_result.gl_pathc > 0) {
+            char *battery_path = strdup(glob_result.gl_pathv[0]);
+            globfree(&glob_result);
+            return battery_path;
         }
     }
+
+    globfree(&glob_result);
+    return NULL;
+}
+
+// Function to get the battery level
+int get_battery_level() {
+    char *capacity_path = get_battery_device_path("capacity");
+    if (capacity_path == NULL) {
+        log_message("Failed to find battery capacity file");
+        return -1;
+    }
+
+    FILE *file = fopen(capacity_path, "r");
+    free(capacity_path);
 
     if (file == NULL) {
         perror("Failed to open capacity file");
@@ -43,6 +85,7 @@ int get_battery_level() {
         return -1;
     }
 
+    int battery_level;
     if (fscanf(file, "%d", &battery_level) != 1) {
         perror("Failed to read battery level");
         log_message("Failed to read battery level");
@@ -78,10 +121,36 @@ void log_message(const char *message) {
     }
 }
 
+char *get_backlight_device_path(const char *file_name) {
+    glob_t glob_result;
+    char pattern[PATH_MAX];
+
+    snprintf(pattern, sizeof(pattern), "/sys/class/backlight/*/%s", file_name);
+
+    if (glob(pattern, 0, NULL, &glob_result) == 0) {
+        if (glob_result.gl_pathc > 0) {
+            char *backlight_path = strdup(glob_result.gl_pathv[0]);
+            globfree(&glob_result);
+            return backlight_path;
+        }
+    }
+
+    globfree(&glob_result);
+    return NULL;
+}
+
 // Function to set the screen brightness
 int set_brightness(int brightness) {
-    const char *brightness_path = "/sys/class/backlight/intel_backlight/brightness";
-    const char *max_brightness_path = "/sys/class/backlight/intel_backlight/max_brightness";
+    char *brightness_path = get_backlight_device_path("brightness");
+    char *max_brightness_path = get_backlight_device_path("max_brightness");
+
+    if (brightness_path == NULL || max_brightness_path == NULL) {
+        log_message("Failed to find backlight brightness files");
+        free(brightness_path);
+        free(max_brightness_path);
+        return -1;
+    }
+
     int max_brightness = 100;
     int new_brightness = 0;
     char buffer[10];
@@ -124,6 +193,8 @@ int set_brightness(int brightness) {
         return -1;
     }
 
+    free(brightness_path);
+    free(max_brightness_path);
     close(fd);
     return 0;
 }
@@ -135,44 +206,19 @@ int activate_battery_saving_mode() {
     // Get the current PID of the running program
     pid_t current_pid = getpid();
 
-    // Call the get_high_cpu_processes from process_monitor.c to get the list of high CPU-consuming processes
-    char *process_list[100];
-    int process_count = get_high_cpu_processes(process_list, 100);
-
-    if (process_count == -1) {
-        log_message("Failed to get high CPU processes");
+    // Suspend high CPU processes
+    log_message("Suspending high CPU processes");
+    if (run_battery_saving_mode(current_pid) == -1) {
+        log_message("Failed to suspend high CPU processes");
         return -1;
     }
 
-    // Loop through each high CPU process and kill it, excluding this program's own PID
-    for (int i = 0; i < process_count; i++) {
-        char command[300];
-        char pid[10];
-        char process_name[100];
-        sscanf(process_list[i], "%9s %99s", pid, process_name);
-
-        pid_t process_pid = atoi(pid);
-
-        if (process_pid == current_pid) {
-            char log_msg[200];
-            snprintf(log_msg, sizeof(log_msg), "Skipping own process: %s (PID: %s)", process_name, pid);
-            log_message(log_msg);
-            continue;
-        }
-
-        char log_msg[200];
-        snprintf(log_msg, sizeof(log_msg), "Killing process: %s (PID: %s)", process_name, pid);
-        log_message(log_msg);
-
-        snprintf(command, sizeof(command), "kill -9 %s", pid);
-        if (system(command) == -1) {
-            log_message("Failed to kill process");
-            free_process_list(process_list, process_count);
-            return -1;
-        }
+    // Suspend user daemons
+    log_message("Suspending user daemons");
+    if (suspend_user_daemons() == -1) {
+        log_message("Failed to suspend user daemons");
+        return -1;
     }
-
-    free_process_list(process_list, process_count);
 
     // Set the brightness to 50% for battery saving
     if (set_brightness(50) == -1) {
@@ -180,13 +226,29 @@ int activate_battery_saving_mode() {
         return -1;
     }
 
+    // Set the battery-saving mode active flag
+    battery_saving_mode_active = 1;
+
     return 0;
 }
 
 // Function to enter sleep mode
 int enter_sleep_mode() {
     log_message("Entering sleep mode");
-    return system("systemctl suspend");
+
+    init_system_t init_sys = detect_init_system();
+
+    switch (init_sys) {
+        case INIT_SYSTEMD:
+            return system("systemctl suspend");
+        case INIT_SYSVINIT:
+            return system("pm-suspend");
+        case INIT_OPENRC:
+            return system("loginctl suspend");
+        default:
+            log_message("Unknown init system, cannot enter sleep mode");
+            return -1;
+    }
 }
 
 // Function to apply custom CSS styles to the GTK widgets
@@ -292,19 +354,14 @@ void show_notification(const char *message, const char *title) {
 
 // Function to check if the battery is charging
 int is_charging() {
-    const char *status_paths[] = {
-        "/sys/class/power_supply/BAT0/status",
-        "/sys/class/power_supply/BAT1/status"
-    };
-    FILE *file;
-    char status[16];
-
-    for (int i = 0; i < sizeof(status_paths) / sizeof(status_paths[0]); i++) {
-        file = fopen(status_paths[i], "r");
-        if (file != NULL) {
-            break;
-        }
+    char *status_path = get_battery_device_path("status");
+    if (status_path == NULL) {
+        log_message("Failed to find battery status file");
+        return -1;
     }
+
+    FILE *file = fopen(status_path, "r");
+    free(status_path);
 
     if (file == NULL) {
         perror("Failed to open status file");
@@ -312,6 +369,7 @@ int is_charging() {
         return -1;
     }
 
+    char status[16];
     if (fscanf(file, "%15s", status) != 1) {
         perror("Failed to read battery status");
         log_message("Failed to read battery status");
@@ -322,4 +380,3 @@ int is_charging() {
     fclose(file);
     return (strcmp(status, "Charging") == 0);
 }
-

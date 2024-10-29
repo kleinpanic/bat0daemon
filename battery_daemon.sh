@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 
+# Version of the script
+VERSION="1.0.0"
+
+# Check for version option
+if [[ "$1" == "--version" ]]; then
+    echo "battery_daemon.sh version $VERSION"
+    exit 0
+fi
+
 # Path to the battery monitor binary
 BINARY_PATH="/usr/local/bin/battery_monitor"
 

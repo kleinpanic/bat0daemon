@@ -16,7 +16,13 @@ all: $(TARGET)
 $(TARGET): $(OBJS)
 	$(CC) -o $(TARGET) $(OBJS) $(LDFLAGS)
 
+install: $(TARGET)
+	@echo "Installing $(TARGET) to /usr/local/bin"
+	cp $(TARGET) /usr/local/bin/
+	chmod +x /usr/local/bin/$(TARGET)
+
 clean:
 	rm -rf $(OBJ_DIR) $(TARGET)
 
-.PHONY: all clean
+.PHONY: all clean install
+

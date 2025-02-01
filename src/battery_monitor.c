@@ -11,9 +11,9 @@
 #include <limits.h>
 
 // Global Variables for Thresholds
-int THRESHOLD_LOW = 25;       // Default values
+int THRESHOLD_LOW = 15;       // Default values
 int THRESHOLD_CRITICAL = 5;
-int THRESHOLD_HIGH = 80;
+int THRESHOLD_HIGH = 70;
 
 // Function to trim leading and trailing whitespace
 static char *trim_whitespace(char *str) {
